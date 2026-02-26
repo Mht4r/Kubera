@@ -82,6 +82,7 @@ class KuberaBot:
     def __init__(self, selftest: bool = False) -> None:
         self.selftest = selftest
         self._client: Optional[AsyncClient] = None
+        self._binance_online: bool = False   # set True only when Binance connect succeeds
         self._risk    = RiskEngine()
         self._balance: float = 0.0
         self._parser  = SignalParser()
@@ -109,11 +110,36 @@ class KuberaBot:
                     "BINANCE_API_KEY / BINANCE_SECRET_KEY not set in .env"
                 )
 
-        self._client = await AsyncClient.create(
-            api_key=cfg.BINANCE_API_KEY,
-            api_secret=cfg.BINANCE_SECRET_KEY,
-            testnet=cfg.BINANCE_TESTNET,
-        )
+        # ── Binance connection (fault-tolerant) ────────────────────────────
+        # AsyncClient.create() always pings api.binance.com.  A DNS failure or
+        # timeout here would kill the process before Telegram ever starts.
+        # We catch all network-level errors and fall back to an offline state so
+        # the Telegram bot can still come online and notify the user.
+        try:
+            self._client = await AsyncClient.create(
+                api_key=cfg.BINANCE_API_KEY,
+                api_secret=cfg.BINANCE_SECRET_KEY,
+                testnet=cfg.BINANCE_TESTNET,
+            )
+            self._binance_online = True
+            logger.info("Binance connection established.")
+        except Exception as exc:
+            logger.critical(
+                "⚠️  Binance connection FAILED at startup: %s\n"
+                "    Bot will start in OFFLINE / PAPER mode.\n"
+                "    Signals cannot be executed until connectivity is restored.",
+                exc,
+            )
+            # Create a minimal client object without pinging (api_key/secret may
+            # be empty — that is fine in paper mode; we just need the object for
+            # type checks elsewhere).
+            self._client = AsyncClient(
+                api_key=cfg.BINANCE_API_KEY or "",
+                api_secret=cfg.BINANCE_SECRET_KEY or "",
+                testnet=cfg.BINANCE_TESTNET,
+            )
+            self._binance_online = False
+            cfg.PAPER_TRADING = True   # force paper mode when offline
 
         market = MarketContext(self._client)
 
@@ -128,7 +154,7 @@ class KuberaBot:
         self._engine = SignalEngine(market)
         self._exec   = ExecutionEngine(self._client, market)
 
-        if not cfg.PAPER_TRADING:
+        if self._binance_online and not cfg.PAPER_TRADING:
             try:
                 await self._client.futures_account()
                 logger.info("API credentials validated")
@@ -140,18 +166,20 @@ class KuberaBot:
         await self._risk.update_balance(self._balance)
         self._perf.update_running_balance(self._balance)
 
-        if not cfg.PAPER_TRADING:
+        if self._binance_online and not cfg.PAPER_TRADING:
             await self._set_leverage_all()
 
-        await self._exec.load_exchange_info("XAUUSDT")
-        if cfg.STARTUP_RECONCILE and not cfg.PAPER_TRADING:
-            ghosts = await self._exec.reconcile_on_startup()
-            if ghosts:
-                logger.warning(
-                    "%d ghost position(s) recovered — SLs must be set manually!", len(ghosts)
-                )
+        if self._binance_online:
+            await self._exec.load_exchange_info("XAUUSDT")
+            if cfg.STARTUP_RECONCILE and not cfg.PAPER_TRADING:
+                ghosts = await self._exec.reconcile_on_startup()
+                if ghosts:
+                    logger.warning(
+                        "%d ghost position(s) recovered — SLs must be set manually!", len(ghosts)
+                    )
 
-        logger.info("%s ready.", cfg.BOT_NAME)
+        status = "ONLINE" if self._binance_online else "OFFLINE (paper-only)"
+        logger.info("%s ready. Binance: %s", cfg.BOT_NAME, status)
 
     async def _set_leverage_all(self) -> None:
         symbols = ["XAUUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
@@ -201,26 +229,56 @@ class KuberaBot:
     # ──────────────────────────────────────────────────────────
 
     async def _stdin_reader(self) -> None:
+        """
+        Reads stdin line-by-line and assembles multi-line signals into one block.
+
+        Flushing rules (whichever comes first):
+          • A blank line (user pressed Enter on an empty line)
+          • 1.2 s idle after at least one line has been buffered
+          • EOF / shutdown
+        """
         loop = asyncio.get_running_loop()
         logger.info("Stdin reader ready. Paste a signal and press Enter.")
+        buffer: list[str] = []
+
+        async def _flush():
+            nonlocal buffer
+            if buffer:
+                block = "\n".join(buffer)
+                buffer = []
+                await self._signal_queue.put(block)
+
         while not self._shutdown.is_set():
+            # Use a shorter timeout once we have lines buffered so we flush quickly
+            deadline = 1.2 if buffer else 5.0
             try:
                 line = await asyncio.wait_for(
                     loop.run_in_executor(None, sys.stdin.readline),
-                    timeout=5.0,
+                    timeout=deadline,
                 )
             except asyncio.TimeoutError:
+                # Idle timeout — flush whatever is buffered
+                await _flush()
                 continue
             except Exception as exc:
                 logger.error("Stdin read error: %s", exc)
+                await _flush()
                 break
+
             line = line.strip()
-            if not line:
-                continue
+
+            # Commands
             if line.lower() in ("quit", "exit", "q"):
+                await _flush()
                 self._shutdown.set()
                 break
-            await self._signal_queue.put(line)
+
+            # Blank line = signal separator
+            if not line:
+                await _flush()
+                continue
+
+            buffer.append(line)
 
     async def _signal_consumer(self) -> None:
         while not self._shutdown.is_set():
@@ -445,7 +503,9 @@ class KuberaBot:
 
         if telegram_mode:
             from bot.telegram_interface import TelegramInterface
-            tg = TelegramInterface(self).build()
+            logger.info("Starting in Telegram mode ...")
+            tg = TelegramInterface(self)
+            await tg.build_async()   # registers commands with Telegram
             await tg.run_polling()
             await self.shutdown()
             return

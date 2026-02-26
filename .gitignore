@@ -1,0 +1,55 @@
+# ─── Secrets & Credentials ─────────────────────────────────
+.env
+*.pem
+*.key
+
+# ─── Bot Runtime Data ──────────────────────────────────────
+state.json
+trades.csv
+kubera.log
+*.log
+
+# ─── Python ────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ─── Virtual Environments ──────────────────────────────────
+venv/
+.venv/
+env/
+.env.local
+.env.*.local
+
+# ─── IDE / Editor ──────────────────────────────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ─── Testing / Coverage ─────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ─── Compiled / Cache ───────────────────────────────────────
+*.pyc
+*.pycache
+__pycache__/
+.cache/
+
+# ─── OS ────────────────────────────────────────────────────
+desktop.ini

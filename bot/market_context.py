@@ -94,6 +94,7 @@ class MarketContext:
         tp1: Optional[float],
         news_flag: bool = False,
     ) -> MarketContextResult:
+
         """
         Fetch multi-TF data and return a MarketContextResult with partial
         confidence scores. Geometry score is set externally by SignalEngine
@@ -202,11 +203,20 @@ class MarketContext:
         return result
 
     # ──────────────────────────────────────────────────────────
+    # Public candle access (for SMC engine and other consumers)
+    # ──────────────────────────────────────────────────────────
+
+    async def get_candles(self, symbol: str, interval: str) -> pd.DataFrame:
+        """Return OHLCV DataFrame for the given symbol / interval (cached)."""
+        return await self._get_candles(symbol, interval)
+
+    # ──────────────────────────────────────────────────────────
     # Candle Fetching with Cache
     # ──────────────────────────────────────────────────────────
 
     @async_retry()
     async def _get_candles(self, symbol: str, interval: str) -> pd.DataFrame:
+
         """Fetch OHLCV candles with per-timeframe TTL cache."""
         cache_key = f"{symbol}:{interval}"
         cached = self._cache.get(cache_key)

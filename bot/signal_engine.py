@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from bot.market_context import MarketContext, MarketContextResult
+from bot.smc_engine import SMCEngine, SMCResult
 from bot.utils import get_logger, weighted_average
 import bot.config as cfg
 
@@ -87,6 +88,7 @@ class SignalDecision:
     position_size: float = 0.0          # filled by RiskEngine
     confidence: float = 0.0
     context: Optional[MarketContextResult] = None
+    smc_result: Optional[SMCResult] = None   # Phase 2.5 SMC analysis
     reduce_size: bool = False
     reject_reason: Optional[str] = None
     optimization_applied: bool = False
@@ -132,6 +134,7 @@ class SignalEngine:
 
     def __init__(self, market_context: MarketContext) -> None:
         self.market = market_context
+        self._smc = SMCEngine()
         self.strict_mode: bool = False
         self._min_rr: float = cfg.MIN_RR
 
@@ -183,14 +186,41 @@ class SignalEngine:
             logger.warning("[%s] REJECTED (Phase 2): %s", raw.symbol, ctx.reject_reason)
             return decision
 
+        # ── Phase 2.5: SMC Confirmation ────────────────────────────
+        if cfg.SMC_ENABLED:
+            try:
+                df_5m = await self.market.get_candles(raw.symbol, "5m")
+                df_1h = await self.market.get_candles(raw.symbol, "1h")
+                smc = self._smc.analyse(
+                    df_5m=df_5m,
+                    df_1h=df_1h,
+                    direction=raw.direction,
+                    entry=decision.entry,
+                    atr=ctx.atr,
+                )
+                decision.smc_result = smc
+                logger.info(
+                    "[%s] SMC: %s", raw.symbol, smc.summary()
+                )
+            except Exception as exc:
+                logger.warning("[%s] SMC analysis failed (non-fatal): %s", raw.symbol, exc)
+                decision.smc_result = None
+        else:
+            decision.smc_result = None
+
         # Geometry score requires RR (only available after Phase 1)
         ctx.geometry_score = self._geometry_score(
             decision.blended_rr, decision.sl_distance, ctx.atr
         )
         ctx.compute_confidence()
-        decision.confidence = ctx.confidence
 
-        logger.info("[%s] Confidence: %.1f/100", raw.symbol, ctx.confidence)
+        # Fold SMC score in (max confidence is now 130 before cap; still cap at 100)
+        base_conf = ctx.confidence
+        smc_bonus  = decision.smc_result.smc_score if decision.smc_result else 0.0
+        decision.confidence = min(base_conf + smc_bonus, 100.0)
+
+        logger.info("[%s] Confidence: %.1f/100 (base=%.0f smc=+%.0f)",
+                    raw.symbol, decision.confidence, base_conf, smc_bonus)
 
         if ctx.confidence < cfg.CONFIDENCE_REJECT_THRESHOLD:
             decision.action = "REJECT"
@@ -393,11 +423,13 @@ class SignalEngine:
         # FIX: use self._min_rr, not cfg.MIN_RR (different in strict mode)
         parts = [
             f"RR=1:{decision.blended_rr:.2f} (min 1:{self._min_rr:.1f})",
-            f"Confidence={ctx.confidence:.0f}/100",
+            f"Confidence={decision.confidence:.0f}/100",
             f"HTF={ctx.htf_trend}",
             f"ATR={ctx.atr:.4f}",
             f"VolRatio={ctx.volume_ratio:.2f}",
         ]
+        if decision.smc_result:
+            parts.append(decision.smc_result.summary())
         if decision.optimization_applied:
             parts.append("Entry/SL optimized")
         if decision.reduce_size:

@@ -108,8 +108,11 @@ class SignalParser:
     Handles the full variety of Telegram channel signal formats.
     """
 
-    # Numbers: 12345, 12345.67, 12,345.67
-    _NUM = r"[\d,]+(?:\.\d+)?"
+    # Numbers: 12345, 12345.67, 12,345 — commas stripped on input
+    _NUM = r"[\d]+(?:\.\d+)?"
+    # Separator chars for ranges: hyphen, en-dash (–), em-dash (—), slash, dots
+    _SEP = r"[/\-\u2013\u2014]+"
+
 
     def parse_text(self, text: str) -> ParsedSignal:
         """
@@ -117,7 +120,12 @@ class SignalParser:
         Raises ValueError if the signal cannot be parsed.
         """
         # Normalise: uppercase, strip commas in numbers, collapse whitespace
-        text_clean = text.upper().replace(",", "")
+        text_clean = (
+            text.upper()
+            .replace(",", "")
+            .replace("\u2013", "-")   # en dash → hyphen
+            .replace("\u2014", "-")   # em dash → hyphen
+        )
         lines = [ln.strip() for ln in text_clean.splitlines() if ln.strip()]
 
         symbol = self._extract_symbol(lines)
@@ -229,40 +237,102 @@ class SignalParser:
         raise ValueError("Could not extract direction (BUY/SELL) from signal")
 
     def _extract_entry(self, lines: list[str]) -> tuple[float, float]:
-        """Extract entry zone as (low, high). Single value → low == high."""
-        num = self._NUM
-        # Pattern: 5070/5073 or 5070-5073 or 5070..5073
-        range_pat = re.compile(rf"({num})\s*[/\-\.]+\s*({num})")
-        # Pattern: @ 5071.5 or entry: 5071.5
-        single_pat = re.compile(rf"(?:@|ENTRY[:\s]+)({num})", re.I)
-        # Pattern: BUY 5070 (lone number after direction keyword)
-        after_dir_pat = re.compile(
-            rf"(?:BUY|SELL|LONG|SHORT|BULLISH|BEARISH)\s+({num})\b", re.I
-        )
+        """
+        Extract entry zone as (low, high). Single value → low == high.
 
+        Handles all of these real-world patterns:
+          GOLD SELL 5070/5073           → range with /
+          GOLD SELL 5070-5073           → range with -
+          GOLD SELL @ 5071              → @ prefix (single)
+          Entry: 5070 - 5073            → labeled range
+          Entry: 5073                   → labeled single
+          Entry 5073                    → labeled single (no colon)
+          ENTRY ZONE: 5070/5073         → labeled range
+          NOW: 5071  /  PRICE: 5071     → now/price prefix
+          BUY 5070  or  SELL 5073       → direction + number
+          GOLD SELL\\n5070-5073          → range on next line
+          🔴 SELL\\n5070                 → lone number on its own line (last resort)
+        """
+        num = self._NUM
         all_text = " ".join(lines)
 
-        m = range_pat.search(all_text)
+        # ── 1. Labeled range: "Entry: 5070-5073" / "Entry 5070/5073" ─────
+        labeled_range = re.compile(
+            rf"(?:ENTRY(?:\s+ZONE)?|ENTRAR|ENTER)[:\s]+({num})\s*[/\-]\s*({num})", re.I
+        )
+        m = labeled_range.search(all_text)
         if m:
             lo, hi = float(m.group(1)), float(m.group(2))
             return (min(lo, hi), max(lo, hi))
 
-        m = single_pat.search(all_text)
+        # ── 2. Labeled single: "Entry: 5071" / "Entry Now: 5071" ─────────
+        labeled_single = re.compile(
+            rf"(?:ENTRY(?:\s+(?:NOW|ZONE|POINT|PRICE))?|ENTRAR|ENTER)[:\s]+({num})\b", re.I
+        )
+        m = labeled_single.search(all_text)
         if m:
             v = float(m.group(1))
             return v, v
 
-        m = after_dir_pat.search(all_text)
+        # ── 3. @ prefix: "@ 5071" ─────────────────────────────────────────
+        at_pat = re.compile(rf"@\s*({num})\b")
+        m = at_pat.search(all_text)
         if m:
             v = float(m.group(1))
             return v, v
 
-        raise ValueError("Could not extract entry price/zone from signal")
+        # ── 4. NOW / PRICE prefix: "NOW: 5071" / "PRICE: 5071" ───────────
+        now_pat = re.compile(rf"(?:NOW|CURRENT\s+PRICE|PRICE)[:\s]+({num})\b", re.I)
+        m = now_pat.search(all_text)
+        if m:
+            v = float(m.group(1))
+            return v, v
+
+        # ── 5. Direction + range on same token: "SELL 5070/5073" ──────────
+        dir_range_pat = re.compile(
+            rf"(?:BUY|SELL|LONG|SHORT|BULLISH|BEARISH)\s+({num})\s*[/\-]\s*({num})\b", re.I
+        )
+        m = dir_range_pat.search(all_text)
+        if m:
+            lo, hi = float(m.group(1)), float(m.group(2))
+            return (min(lo, hi), max(lo, hi))
+
+        # ── 6. Direction + single: "SELL 5073" ────────────────────────────
+        dir_single_pat = re.compile(
+            rf"(?:BUY|SELL|LONG|SHORT|BULLISH|BEARISH)\s+({num})\b", re.I
+        )
+        m = dir_single_pat.search(all_text)
+        if m:
+            v = float(m.group(1))
+            return v, v
+
+        # ── 7. Bare range anywhere in text (last resort): "5070-5073" ─────
+        #    Guard: both numbers must be > 100 (avoid matching SL/TP by mistake)
+        bare_range = re.compile(rf"({num})\s*[/\-]\s*({num})")
+        for m in bare_range.finditer(all_text):
+            lo, hi = float(m.group(1)), float(m.group(2))
+            if lo > 100 and hi > 100 and lo != hi:
+                return (min(lo, hi), max(lo, hi))
+
+        # ── 8. Lone large number on its own line (absolute last resort) ───
+        #    Pick the first line that is purely a number and looks like a price
+        for line in lines:
+            m = re.fullmatch(rf"\s*({num})\s*", line)
+            if m:
+                v = float(m.group(1))
+                if v > 100:   # heuristic: prices are at least 100
+                    return v, v
+
+        raise ValueError(
+            "Could not extract entry price/zone from signal\\. "
+            "Please use a format like:\\n"
+            "`GOLD SELL 3290-3295\\nSL 3310\\nTP1 3275`"
+        )
 
     def _extract_sl(self, lines: list[str]) -> Optional[float]:
         """Extract stop loss value."""
         num = self._NUM
-        pat = re.compile(rf"(?:SL|STOP[\s_\-]*LOSS|STOP)[:\s]*({num})", re.I)
+        pat = re.compile(rf"(?:SL|STOP[\s_\-]*LOSS|STOP)[:\s@]*({num})", re.I)
         for line in lines:
             m = pat.search(line)
             if m:

@@ -7,7 +7,7 @@ An **intelligent signal execution engine** for Binance Futures. It never blindly
 ## Architecture
 
 ```
-aladin/
+kubera2/
 ├── bot/
 │   ├── __init__.py
 │   ├── config.py             ← All settings (env-driven)

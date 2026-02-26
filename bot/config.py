@@ -129,3 +129,28 @@ RATE_LIMIT_PAUSE_SEC: float = float(os.getenv("RATE_LIMIT_PAUSE_SEC", "60.0"))
 # Used for blended RR calculation. Extra TPs share the last weight.
 # ─────────────────────────────────────────────────────────────────────────────
 TP_WEIGHTS: tuple[float, ...] = (0.50, 0.30, 0.20)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Smart Money Concepts (SMC) Engine
+# ─────────────────────────────────────────────────────────────────────────────
+# Set SMC_ENABLED=false to run the older 5-phase pipeline without SMC
+SMC_ENABLED:           bool  = os.getenv("SMC_ENABLED", "true").lower() == "true"
+
+# Order Block lookback (candles on 5m; H1 uses OB_LOOKBACK // 5)
+SMC_OB_LOOKBACK:       int   = int(os.getenv("SMC_OB_LOOKBACK", "50"))
+
+# Fair Value Gap lookback (candles on 5m)
+SMC_FVG_LOOKBACK:      int   = int(os.getenv("SMC_FVG_LOOKBACK", "30"))
+
+# S/R detection lookback (candles on 1h) and minimum touches to qualify
+SMC_SR_LOOKBACK:       int   = int(os.getenv("SMC_SR_LOOKBACK", "100"))
+SMC_SR_TOUCH_MIN:      int   = int(os.getenv("SMC_SR_TOUCH_MIN", "2"))
+
+# Zone tolerance expressed as a multiple of ATR
+# (e.g. 0.3 means price within 0.3×ATR of zone boundary qualifies)
+SMC_ZONE_TOLERANCE_ATR: float = float(os.getenv("SMC_ZONE_TOLERANCE_ATR", "0.3"))
+
+# Minimum SMC score (0–30) before SMC adds a partial reject recommendation
+# (does NOT hard-reject; only adds a note and reduces soft-confidence)
+SMC_WEAK_SCORE_THRESHOLD: float = float(os.getenv("SMC_WEAK_SCORE_THRESHOLD", "5.0"))
+
