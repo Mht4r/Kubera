@@ -46,6 +46,7 @@ logger = get_logger("signal_parser")
 SYMBOL_ALIASES: dict[str, str] = {
     "GOLD": "XAUUSDT",
     "XAU": "XAUUSDT",
+    "XAUUSD": "XAUUSDT",   # common shorthand without the trailing T
     "BTC": "BTCUSDT",
     "BITCOIN": "BTCUSDT",
     "ETH": "ETHUSDT",
@@ -110,8 +111,8 @@ class SignalParser:
 
     # Numbers: 12345, 12345.67, 12,345 — commas stripped on input
     _NUM = r"[\d]+(?:\.\d+)?"
-    # Separator chars for ranges: hyphen, en-dash (–), em-dash (—), slash, dots
-    _SEP = r"[/\-\u2013\u2014]+"
+    # Separator chars for ranges: hyphen, en-dash (–), em-dash (—), slash, plus
+    _SEP = r"[/\-\+\u2013\u2014]+"
 
 
     def parse_text(self, text: str) -> ParsedSignal:
@@ -212,7 +213,7 @@ class SignalParser:
 
         # Try known aliases
         for line in lines:
-            tokens = re.split(r"[\s/\-@|]+", line)
+            tokens = re.split(r"[\s/\-@|\+]+", line)
             for token in tokens:
                 token = re.sub(r"[^A-Z]", "", token)
                 if token in SYMBOL_ALIASES:
@@ -256,9 +257,9 @@ class SignalParser:
         num = self._NUM
         all_text = " ".join(lines)
 
-        # ── 1. Labeled range: "Entry: 5070-5073" / "Entry 5070/5073" ─────
+        # ── 1. Labeled range: "Entry: 5070-5073" / "Entry 5070/5073" / "Entry 5188+5180" ─────
         labeled_range = re.compile(
-            rf"(?:ENTRY(?:\s+ZONE)?|ENTRAR|ENTER)[:\s]+({num})\s*[/\-]\s*({num})", re.I
+            rf"(?:ENTRY(?:\s+ZONE)?|ENTRAR|ENTER)[:\s]+({num})\s*[/\-\+]\s*({num})", re.I
         )
         m = labeled_range.search(all_text)
         if m:
@@ -290,7 +291,7 @@ class SignalParser:
 
         # ── 5. Direction + range on same token: "SELL 5070/5073" ──────────
         dir_range_pat = re.compile(
-            rf"(?:BUY|SELL|LONG|SHORT|BULLISH|BEARISH)\s+({num})\s*[/\-]\s*({num})\b", re.I
+            rf"(?:BUY|SELL|LONG|SHORT|BULLISH|BEARISH)\s+({num})\s*[/\-\+]\s*({num})\b", re.I
         )
         m = dir_range_pat.search(all_text)
         if m:
@@ -306,9 +307,9 @@ class SignalParser:
             v = float(m.group(1))
             return v, v
 
-        # ── 7. Bare range anywhere in text (last resort): "5070-5073" ─────
+        # ── 7. Bare range anywhere in text (last resort): "5070-5073" / "5188+5180" ─────
         #    Guard: both numbers must be > 100 (avoid matching SL/TP by mistake)
-        bare_range = re.compile(rf"({num})\s*[/\-]\s*({num})")
+        bare_range = re.compile(rf"({num})\s*[/\-\+]\s*({num})")
         for m in bare_range.finditer(all_text):
             lo, hi = float(m.group(1)), float(m.group(2))
             if lo > 100 and hi > 100 and lo != hi:
@@ -344,8 +345,8 @@ class SignalParser:
         num = self._NUM
         tps: list[float] = []
 
-        # Explicit TP lines: "TP 5065", "TP1: 5060", "T/P 5050"
-        tp_line = re.compile(rf"(?:TP|T/P|TAKE[\s_\-]*PROFIT)[1-9]?[:\s]+({num})", re.I)
+        # Explicit TP lines: "TP 5065", "TP1: 5060", "T/P 5050", "TP5200" (no space)
+        tp_line = re.compile(rf"(?:TP|T/P|TAKE[\s_\-]*PROFIT)(?:[1-9](?!\d))?[:\s]*({num})", re.I)
         for line in lines:
             m = tp_line.search(line)
             if m:
@@ -353,7 +354,7 @@ class SignalParser:
 
         # Slash-separated TPs: "TP 5065/5060/5050"
         if not tps:
-            slash_pat = re.compile(rf"(?:TP|T/P)[:\s]+({num}(?:\s*/\s*{num})+)", re.I)
+            slash_pat = re.compile(rf"(?:TP|T/P)[:\s]*({num}(?:\s*/\s*{num})+)", re.I)
             m = slash_pat.search(" ".join(lines))
             if m:
                 tps = [float(x.strip()) for x in m.group(1).split("/")]
