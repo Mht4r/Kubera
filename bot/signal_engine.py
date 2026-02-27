@@ -79,11 +79,13 @@ class SignalDecision:
     symbol: str
     direction: str
     entry: float                         # optimized entry price
-    stop_loss: float                     # optimized SL
-    take_profits: list[float]            # optimized TPs
-    sl_distance: float
-    blended_rr: float
-    per_tp_rr: list[float]
+    entry_low: float = 0.0              # original signal zone low
+    entry_high: float = 0.0             # original signal zone high
+    stop_loss: float = 0.0              # optimized SL
+    take_profits: list[float] = field(default_factory=list)  # optimized TPs
+    sl_distance: float = 0.0
+    blended_rr: float = 0.0
+    per_tp_rr: list[float] = field(default_factory=list)
     risk_pct: float = 0.0                # filled by RiskEngine
     position_size: float = 0.0          # filled by RiskEngine
     confidence: float = 0.0
@@ -295,6 +297,8 @@ class SignalEngine:
             symbol=raw.symbol,
             direction=raw.direction,
             entry=entry,
+            entry_low=raw.entry_low,
+            entry_high=raw.entry_high,
             stop_loss=sl,
             take_profits=tps,
             sl_distance=sl_dist,
@@ -410,6 +414,8 @@ class SignalEngine:
             symbol=raw.symbol,
             direction=raw.direction,
             entry=0.0,
+            entry_low=raw.entry_low,
+            entry_high=raw.entry_high,
             stop_loss=raw.stop_loss,
             take_profits=list(raw.take_profits),
             sl_distance=0.0,

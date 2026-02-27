@@ -158,9 +158,10 @@ class ExecutionEngine:
             self._open_trades[symbol] = None  # type: ignore[assignment]
 
         logger.info(
-            "[%s] Waiting for price to enter zone [%.4f – %.4f] ...",
-            symbol, decision.entry - decision.sl_distance * 0.2,
-            decision.entry + decision.sl_distance * 0.2,
+            "[%s] Waiting for price to enter zone [%.4f – %.4f] (no timeout) ...",
+            symbol,
+            decision.entry_low if decision.entry_low > 0 else decision.entry,
+            decision.entry_high if decision.entry_high > 0 else decision.entry,
         )
 
         trade = await self._wait_for_entry(decision)
@@ -266,17 +267,26 @@ class ExecutionEngine:
     # ──────────────────────────────────────────────────────────
 
     async def _wait_for_entry(self, decision: SignalDecision) -> Optional[OpenTrade]:
-        """Poll price until it enters the zone, then confirm with a candle pattern."""
+        """Poll price until it enters the zone, then confirm with a candle pattern.
+
+        Uses the actual signal entry zone (entry_low → entry_high).
+        Waits indefinitely — trade is only cancelled by SL/TP hit or manual /cancel.
+        """
         symbol = decision.symbol
         direction = decision.direction
-        sl_d = decision.sl_distance * 0.2
-        entry_low  = decision.entry - sl_d
-        entry_high = decision.entry + sl_d
-        deadline = time.time() + cfg.ENTRY_ZONE_TIMEOUT_MIN * 60
+
+        # Use the real zone from the signal; fall back to a ±1 tick band if degenerate
+        entry_low  = decision.entry_low  if decision.entry_low  > 0 else decision.entry
+        entry_high = decision.entry_high if decision.entry_high > 0 else decision.entry
+        if entry_low == entry_high:
+            # Single-price signal — widen by 0.5% so minute noise doesn't stall forever
+            margin = entry_low * 0.005
+            entry_low  -= margin
+            entry_high += margin
 
         last_prices: list[float] = []
 
-        while time.time() < deadline:
+        while True:  # wait indefinitely — cancelled externally or via _open_trades slot
             # Check if cancelled while waiting
             if self._open_trades.get(symbol) is None:
                 logger.info("[%s] Trade slot cleared externally — aborting wait", symbol)
@@ -319,9 +329,6 @@ class ExecutionEngine:
                 continue
 
             return await self._place_entry(decision, actual_entry, atr)
-
-        logger.warning("[%s] Entry zone timeout — signal expired", symbol)
-        return None
 
     async def _confirm_entry(
         self,
